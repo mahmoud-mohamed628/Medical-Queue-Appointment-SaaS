@@ -1,0 +1,6 @@
+{
+  "name": "Medical Queue & Appointment SaaS",
+  "description": "Système de gestion de rendez-vous médicaux et de file d'attente en temps réel pour cliniques au Maroc, avec alertes WhatsApp simulées.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

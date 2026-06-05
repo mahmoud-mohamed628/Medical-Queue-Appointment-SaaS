@@ -1,0 +1,232 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// Rôles d'utilisateurs disponibles dans le SaaS de santé marocain
+enum UserRole {
+  PATIENT
+  SECRETARY
+  DOCTOR
+  ADMIN
+}
+
+/// Langues de préférence pour les notifications et l'interface (bilingue Maroc)
+enum LanguagePreference {
+  FR     // Français
+  AR     // Arabe
+}
+
+/// Statuts d'un rendez-vous
+enum AppointmentStatus {
+  PENDING      // En attente de confirmation par le secrétariat
+  CONFIRMED    // Confirmé
+  RESCHEDULED  // Reporté
+  CANCELED     // Annulé
+  COMPLETED    // Terminé (visite effectuée)
+  NOSHOW       // Absent (patient ne s'est pas présenté)
+}
+
+/// Statuts du ticket de file d'attente quotidienne
+enum QueueEntryStatus {
+  WAITING      // En attente dans la salle
+  CALLED       // Appelé par le médecin (notification envoyée)
+  SERVING      // Actuellement en consultation
+  COMPLETED    // Consultation terminée
+  MISSED       // Patient absent lors de l'appel
+}
+
+/// Statut de la file d'attente globale quotidienne du cabinet
+enum QueueStatus {
+  NOT_STARTED  // Cabinet fermé ou file non active
+  ACTIVE       // Consultation en cours
+  PAUSED       // Le médecin est en pause
+  COMPLETED    // Journée terminée
+}
+
+/// Type de notification envoyée
+enum NotificationType {
+  WHATSAPP_CONFIRMATION
+  WHATSAPP_REMINDER
+  WHATSAPP_YOUR_TURN       // "Prochain sur la liste" - invitation à se présenter
+  WHATSAPP_DELAY_ALERT     // Alerte de retard du médecin
+}
+
+/// Statut d'envoi de la notification
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// Modèle Utilisateur principal (Patients, Secrétaires, Médecins, Admins)
+model User {
+  id                 String             @id @default(uuid())
+  email              String?            @unique
+  passwordHash       String
+  firstName          String
+  lastName           String
+  
+  // Format international requis pour Twilio (+212xxxxxxxx pour le Maroc)
+  phoneNumber        String             @unique
+  
+  role               UserRole           @default(PATIENT)
+  language           LanguagePreference @default(FR)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  // Profils spécialisés liés
+  doctorProfile      Doctor?            @relation("UserToDoctor")
+  secretaryProfile   Secretary?         @relation("UserToSecretary")
+  
+  // Relations d'activité
+  appointments       Appointment[]      @relation("PatientAppointments")
+  queueEntries       QueueEntry[]       @relation("PatientQueueEntries")
+  notifications      Notification[]     @relation("UserNotifications")
+
+  @@index([phoneNumber])
+  @@index([role])
+}
+
+/// Profil détaillé des Médecins
+model Doctor {
+  id                 String             @id @default(uuid())
+  userId             String             @unique
+  user               User               @relation("UserToDoctor", fields: [userId], references: [id], onDelete: Cascade)
+  
+  specialty          String             // ex: Cardiologue, Pédiatre...
+  licenseNumber      String             @unique // Numéro d'ordre national des médecins au Maroc (CNOM)
+  cabinetName        String             // Nom de la clinique ou du cabinet
+  cabinetAddress     String             // Adresse physique
+  city               String             // Ville au Maroc (ex: Casablanca, Rabat, Marrakech...)
+  
+  // Paramètres de file d'attente du cabinet
+  avgConsultationTime Int               @default(15) // Temps moyen par consultation en minutes
+  
+  // Relations
+  secretaries        Secretary[]        @relation("DoctorSecretaries")
+  appointments       Appointment[]
+  queues             Queue[]
+
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([city])
+  @@index([specialty])
+}
+
+/// Profil des Secrétaires (associé à un ou plusieurs médecins d'un même cabinet)
+model Secretary {
+  id                 String             @id @default(uuid())
+  userId             String             @unique
+  user               User               @relation("UserToSecretary", fields: [userId], references: [id], onDelete: Cascade)
+  
+  doctorId           String
+  doctor             Doctor             @relation("DoctorSecretaries", fields: [doctorId], references: [id], onDelete: Cascade)
+
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+}
+
+/// Gestion des rendez-vous classiques réservés en avance
+model Appointment {
+  id                 String            @id @default(uuid())
+  
+  patientId          String
+  patient            User              @relation("PatientAppointments", fields: [patientId], references: [id], onDelete: Cascade)
+  
+  doctorId           String
+  doctor             Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  
+  dateTime           DateTime          // Date et heure prévue du rendez-vous
+  status             AppointmentStatus @default(PENDING)
+  notes              String?           // Symptômes ou remarques particulières
+  
+  // Relation optionnelle vers le ticket de file d'attente actuel (si le patient effectue son check-in aujourd'hui)
+  queueEntry         QueueEntry?
+
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@index([dateTime])
+  @@index([status])
+}
+
+/// File d'attente globale quotidienne par Cabinet/Médecin
+model Queue {
+  id                 String            @id @default(uuid())
+  
+  doctorId           String
+  doctor             Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  
+  date               DateTime          // Journée de la file d'attente (ex: 2026-06-04)
+  status             QueueStatus       @default(NOT_STARTED)
+  
+  // Indicateurs en temps réel pour l'estimation de l'attente
+  currentNumber      Int               @default(0)  // Ticket actuellement en cours de traitement
+  totalTickets       Int               @default(0)  // Nombre total de tickets attribués ce jour
+  
+  entries            QueueEntry[]
+
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  // On s'assure qu'il n'y a qu'une seule file d'attente active par médecin et par jour
+  @@unique([doctorId, date])
+  @@index([date])
+}
+
+/// Ticket individuel dans la file d'attente du jour (Patient planifié ou sans RDV/Walk-in)
+model QueueEntry {
+  id                 String            @id @default(uuid())
+  
+  queueId            String
+  queue              Queue             @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  
+  patientId          String
+  patient            User              @relation("PatientQueueEntries", fields: [patientId], references: [id], onDelete: Cascade)
+  
+  appointmentId      String?           @unique
+  appointment        Appointment?      @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  
+  ticketNumber       Int               // Numéro attribué (ex: 1, 2, 3...)
+  status             QueueEntryStatus  @default(WAITING)
+  
+  // Horodatage pour suivi des KPI de performance du cabinet (temps d'attente réel)
+  checkInAt          DateTime          @default(now()) // Arrivée en salle d'attente
+  calledAt           DateTime?         // Heure d'appel par le médecin
+  completedAt        DateTime?         // Heure de départ
+
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@unique([queueId, ticketNumber])
+  @@index([status])
+}
+
+/// Suivi de la délivrabilité des notifications WhatsApp (via Twilio)
+model Notification {
+  id                 String             @id @default(uuid())
+  
+  receiverId         String
+  receiver           User               @relation("UserNotifications", fields: [receiverId], references: [id], onDelete: Cascade)
+  
+  type               NotificationType
+  status             NotificationStatus @default(PENDING)
+  
+  message            String             // Contenu du message (Français ou Arabe selon la préférence)
+  phoneNumber        String             // Numéro utilisé (+212...)
+  twilioSid          String?            @unique // ID de transaction Twilio
+  
+  sentAt             DateTime?
+  createdAt          DateTime           @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+}
